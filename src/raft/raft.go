@@ -99,7 +99,8 @@ func (rf *Raft) EnviaBatimento() {
 
 func (rf *Raft) TornaLider() {
 	rf.State = 0
-	ticker := time.NewTicker(150 * time.Millisecond)
+	fmt.Println(rf.me)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	go func() {
 		rf.EnviaBatimento()
 		<-ticker.C
@@ -114,39 +115,38 @@ func (rf *Raft) TornaLider() {
 }
 
 func (rf *Raft) IniciaEleicao() {
-	fmt.Println("AAAAAAAAAAAAAAAAA")
 	rf.State = 1
 	rf.CurrentTerm += 1
 	term := rf.CurrentTerm
 	rf.TimerEleicao = time.Now()
 	rf.VotedFor = rf.me
 	votes := 1
-	fmt.Println("daoskdosak")
 	for _, peer := range rf.peers {
-		args := RequestVoteArgs{
-			Term:        term,
-			CandidateID: rf.me,
-		}
+		go func(peer *labrpc.ClientEnd) {
+			args := RequestVoteArgs{
+				Term:        term,
+				CandidateID: rf.me,
+			}
 
-		var reply RequestVoteReply
-		peer.Call("Raft.RequestVote", args, &reply)
-		rf.mu.Lock()
-		if rf.State == 1 {
-			if reply.Term > term {
-				rf.reseta(reply.Term)
-				return
-			} else if reply.Term == term {
-				if reply.VoteGranted {
-					votes += 1
-				}
-
-				if votes*50 > len(rf.peers)+1 {
-					rf.TornaLider()
+			var reply RequestVoteReply
+			peer.Call("Raft.RequestVote", args, &reply)
+			rf.mu.Lock()
+			if rf.State == 1 {
+				if reply.Term > term {
+					rf.reseta(reply.Term)
 					return
+				} else if reply.Term == term {
+					if reply.VoteGranted {
+						votes += 1
+					}
+					if votes*2 > len(rf.peers)+1 {
+						rf.TornaLider()
+						return
+					}
 				}
 			}
-		}
-		rf.mu.Unlock()
+			rf.mu.Unlock()
+		}(peer)
 	}
 
 	go rf.TimerEleicaoAssist()
@@ -157,26 +157,22 @@ func (rf *Raft) TimerEleicaoAssist() {
 	term := rf.CurrentTerm
 	rf.mu.Unlock()
 
-	intervalo := time.Duration(100+rand.Intn(100)) * time.Millisecond
+	intervalo := time.Duration(400+rand.Intn(300)) * time.Millisecond
 
 	ticker := time.NewTicker(10 * time.Millisecond)
 	for range ticker.C {
-		entered := false
 		rf.mu.Lock()
-		if rf.State != 0 && rf.State != 3 || term != rf.CurrentTerm {
+		if rf.State != 1 && rf.State != 2 || term != rf.CurrentTerm {
 			rf.mu.Unlock()
-			entered = true
+			return
 		}
 
 		if elapsed := time.Since(rf.TimerEleicao); elapsed >= intervalo {
 			rf.IniciaEleicao()
 			rf.mu.Unlock()
-			entered = true
+			return
 		}
-
-		if !entered {
-			rf.mu.Unlock()
-		}
+		rf.mu.Unlock()
 	}
 	ticker.Stop()
 }
@@ -202,6 +198,7 @@ func (rf *Raft) reseta(term int) {
 	rf.VotedFor = -1
 	rf.CurrentTerm = term
 	rf.TimerEleicao = time.Now()
+	go rf.TimerEleicaoAssist()
 }
 
 // save Raft's persistent state to stable storage,
@@ -250,12 +247,16 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	if rf.State != 3 {
 		if args.Term < rf.CurrentTerm {
 			reply.Success = false
-		} else if args.Term == rf.CurrentTerm {
+		}
+
+		if args.Term == rf.CurrentTerm {
 			reply.Success = true
 			if rf.State != 2 {
 				rf.reseta(args.Term)
 			}
-		} else if args.Term > rf.CurrentTerm {
+		}
+
+		if args.Term > rf.CurrentTerm {
 			reply.Success = false
 			rf.reseta(args.Term)
 		}
@@ -284,23 +285,25 @@ type RequestVoteReply struct {
 }
 
 // example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B). ------------------------------------------------------------------------------------------------------------------------------------
 	rf.mu.Lock()
+
 	if rf.State != 3 {
 		if args.Term > rf.CurrentTerm {
 			rf.reseta(args.Term)
 		}
 
-		if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateID) && args.Term >= rf.CurrentTerm {
+		if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateID) && args.Term == rf.CurrentTerm {
 			reply.VoteGranted = true
 			rf.VotedFor = args.CandidateID
-		}
-
-		if args.Term < rf.CurrentTerm {
+		} else if args.Term < rf.CurrentTerm {
+			reply.VoteGranted = false
+		} else {
 			reply.VoteGranted = false
 		}
 	}
+	reply.Term = rf.CurrentTerm
 	rf.mu.Unlock()
 }
 
