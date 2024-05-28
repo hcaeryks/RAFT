@@ -18,8 +18,11 @@ package raft
 //
 
 import (
+	"fmt"
+	"math/rand"
 	"sd/labrpc"
 	"sync"
+	"time"
 )
 
 // import "bytes"
@@ -56,8 +59,9 @@ type Raft struct {
 	Log         []Log
 
 	// Volátil (todos)
-	CommitIndex int
-	LastApplied int
+	TimerEleicao time.Time
+	CommitIndex  int
+	LastApplied  int
 	// Lider = 0
 	// Candidato = 1
 	// Seguidor = 2
@@ -69,22 +73,112 @@ type Raft struct {
 	MatchIndex []int
 }
 
-func (rf *Raft) EnviaBatimento(server int) {
+func (rf *Raft) EnviaBatimento() {
 	rf.mu.Lock()
 	if rf.State == 0 {
+		var CurrentTerm = rf.CurrentTerm
+		rf.mu.Unlock()
 		for _, peer := range rf.peers {
-			args := AppendEntriesArgs {
-				Term: rf.CurrentTerm,
+			args := AppendEntriesArgs{
+				Term:     CurrentTerm,
 				LeaderId: rf.me,
 			}
 
 			var reply AppendEntriesReply
-			if err := rf.peers[server].Call("Raft.AppendEntries", args, &reply) == nil {
-				
+			peer.Call("Raft.AppendEntries", args, &reply)
+			rf.mu.Lock()
+			if reply.Term > CurrentTerm {
+				rf.reseta(reply.Term)
+				break
 			}
+			rf.mu.Unlock()
 		}
 	}
 	rf.mu.Unlock()
+}
+
+func (rf *Raft) TornaLider() {
+	rf.State = 0
+	ticker := time.NewTicker(150 * time.Millisecond)
+	go func() {
+		rf.EnviaBatimento()
+		<-ticker.C
+		rf.mu.Lock()
+		if rf.State != 0 {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
+	}()
+	ticker.Stop()
+}
+
+func (rf *Raft) IniciaEleicao() {
+	fmt.Println("AAAAAAAAAAAAAAAAA")
+	rf.State = 1
+	rf.CurrentTerm += 1
+	term := rf.CurrentTerm
+	rf.TimerEleicao = time.Now()
+	rf.VotedFor = rf.me
+	votes := 1
+	fmt.Println("daoskdosak")
+	for _, peer := range rf.peers {
+		args := RequestVoteArgs{
+			Term:        term,
+			CandidateID: rf.me,
+		}
+
+		var reply RequestVoteReply
+		peer.Call("Raft.RequestVote", args, &reply)
+		rf.mu.Lock()
+		if rf.State == 1 {
+			if reply.Term > term {
+				rf.reseta(reply.Term)
+				return
+			} else if reply.Term == term {
+				if reply.VoteGranted {
+					votes += 1
+				}
+
+				if votes*50 > len(rf.peers)+1 {
+					rf.TornaLider()
+					return
+				}
+			}
+		}
+		rf.mu.Unlock()
+	}
+
+	go rf.TimerEleicaoAssist()
+}
+
+func (rf *Raft) TimerEleicaoAssist() {
+	rf.mu.Lock()
+	term := rf.CurrentTerm
+	rf.mu.Unlock()
+
+	intervalo := time.Duration(100+rand.Intn(100)) * time.Millisecond
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	for range ticker.C {
+		entered := false
+		rf.mu.Lock()
+		if rf.State != 0 && rf.State != 3 || term != rf.CurrentTerm {
+			rf.mu.Unlock()
+			entered = true
+		}
+
+		if elapsed := time.Since(rf.TimerEleicao); elapsed >= intervalo {
+			rf.IniciaEleicao()
+			rf.mu.Unlock()
+			entered = true
+		}
+
+		if !entered {
+			rf.mu.Unlock()
+		}
+	}
+	ticker.Stop()
 }
 
 // return currentTerm and whether this server
@@ -101,6 +195,13 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 
 	return term, isleader
+}
+
+func (rf *Raft) reseta(term int) {
+	rf.State = 2
+	rf.VotedFor = -1
+	rf.CurrentTerm = term
+	rf.TimerEleicao = time.Now()
 }
 
 // save Raft's persistent state to stable storage,
@@ -152,20 +253,18 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		} else if args.Term == rf.CurrentTerm {
 			reply.Success = true
 			if rf.State != 2 {
-				rf.State = 2
-				rf.VotedFor = -1
+				rf.reseta(args.Term)
 			}
 		} else if args.Term > rf.CurrentTerm {
 			reply.Success = false
-			rf.CurrentTerm = args.Term
-			rf.VotedFor = -1
-			rf.State = 2
+			rf.reseta(args.Term)
 		}
 
 		reply.Term = rf.CurrentTerm
 	}
 	rf.mu.Unlock()
 }
+
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -190,10 +289,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	if rf.State != 3 {
 		if args.Term > rf.CurrentTerm {
-			rf.State = 2
-			rf.VotedFor = -1
-			rf.CurrentTerm = args.Term
-		} 
+			rf.reseta(args.Term)
+		}
 
 		if (rf.VotedFor == -1 || rf.VotedFor == args.CandidateID) && args.Term >= rf.CurrentTerm {
 			reply.VoteGranted = true
@@ -285,7 +382,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C). ------------------------------------------------------------------------------------------------------------------------------------
-
+	rf.State = 2
+	rf.VotedFor = -1
+	rf.mu.Lock()
+	rf.TimerEleicao = time.Now()
+	rf.mu.Unlock()
+	go rf.TimerEleicaoAssist()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
