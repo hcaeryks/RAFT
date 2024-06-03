@@ -21,8 +21,6 @@ import "time"
 import "sync"
 import "sd/labrpc"
 import "math/rand"
-import "bytes"
-import "encoding/gob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -112,7 +110,7 @@ func (rf *Raft) iniciaEleicao() {
 				} else if reply.VoteGranted == true {
 					votes += 1
 					if votes*2 > len(rf.peers) {
-						ok := rf.CheckStateAndTransfer(0)
+						ok := rf.mudaEstadoSeguro(0)
 						if ok {
 							go rf.liderHeartBeat()
 							return
@@ -130,7 +128,7 @@ func (rf *Raft) liderHeartBeat() {
 	primeira := true
 
 	for {
-		// Verifica se é a primeira iteração para otimizar os lockss
+		// Verifica se é a primeira iteração para otimizar os locks
 		if primeira == false {
 			rf.mu.Lock()
 		}
@@ -180,7 +178,7 @@ func (rf *Raft) liderHeartBeat() {
 	}
 }
 
-func (rf *Raft) Unlock() {
+func (rf *Raft) Unlock() {  // Necessário para uma parte específica de apply entry
 	rf.mu.Unlock()
 }
 
@@ -208,13 +206,14 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	
-	w := new(bytes.Buffer)
-	e := gob.NewEncoder(w)
-	e.Encode(rf.term)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.logs)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	// Your code here (2C).
+	// Example:
+	// w := new(bytes.Buffer)
+	// e := gob.NewEncoder(w)
+	// e.Encode(rf.xxx)
+	// e.Encode(rf.yyy)
+	// data := w.Bytes()
+	// rf.persister.SaveRaftState(data)
 }
 
 //
@@ -223,18 +222,15 @@ func (rf *Raft) persist() {
 func (rf *Raft) readPersist(data []byte) {
 	// Your code here (2C).
 	
-	r := bytes.NewBuffer(data)
-	d := gob.NewDecoder(r)
-	var term int
-	var votedFor int
-	logs := new([]Log)
+	// Your code here (2C).
+	// Example:
+	// r := bytes.NewBuffer(data)
+	// d := gob.NewDecoder(r)
+	// d.Decode(&rf.xxx)
+	// d.Decode(&rf.yyy)
 
-	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(logs) != nil {
-
-	} else {
-		rf.term = term
-		rf.votedFor = votedFor
-		rf.logs = *logs
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
 	}
 }
 
@@ -364,7 +360,7 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendArgs, reply *AppendReply
 	return ok
 }
 
-func (rf *Raft) CheckStateAndTransfer(state int) bool {
+func (rf *Raft) mudaEstadoSeguro(state int) bool {
 
 	if state == 2 || (state == 1 && rf.state == 2) || (state == 0 && rf.state == 1) {
 		rf.state = state
@@ -393,92 +389,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-	rf.mu.Lock()
-	defer rf.Unlock()
-
-	if rf.state != 0 {
-		isLeader = false
-		return index, term, isLeader
-	}
-
-	term = rf.term
-	rf.logs = append(rf.logs, Log{command, rf.term})
-	rf.persist()
-	index = len(rf.logs)
-	peers_num := len(rf.peers)
-	success_count := 1
-
-	for i := 0; i < peers_num; i++ {
-		server := i
-		if i != rf.me {
-			var args AppendArgs
-			var reply AppendReply
-			args.Server = rf.me
-			args.Term = rf.term
-			args.LeaderId = rf.me
-			startIndex := max(0, index-5)
-			go func() {
-				retry := 2
-				for {
-					rf.mu.Lock()
-					if rf.vivo == false || rf.term != args.Term || rf.state != 0 {
-						rf.mu.Unlock()
-						break
-					}
-					var entries []Log
-					for i := startIndex; i < index; i += 1 {
-						entries = append(entries, rf.logs[i])
-					}
-					args.Entries = entries
-					args.PrevLogIndex = startIndex - 1
-					args.LeaderCommit = rf.commitIndex
-					if args.PrevLogIndex >= 0 {
-						args.PrevLogTerm = rf.logs[args.PrevLogIndex].TERM
-					}
-
-					rf.mu.Unlock()
-					ok := rf.sendAppendEntry(server, &args, &reply)
-
-					rf.mu.Lock()
-					if ok {
-						if reply.Term > rf.term {
-							rf.term = reply.Term
-							rf.state = 2
-							rf.votedFor = -1
-
-							rf.mu.Unlock()
-
-							break
-						} else {
-							if reply.Success {
-								success_count += 1
-
-								if success_count > peers_num/2 {
-									if rf.commitIndex < index-1 {
-										rf.commitIndex = max(rf.commitIndex, index-1)
-										rf.cond.Signal()
-									}
-								}
-								rf.mu.Unlock()
-								break
-							} else {
-
-								startIndex = max(0, index-5*retry)
-								if startIndex != 0 {
-									retry *= 2
-								}
-							}
-						}
-					} else {
-						retry += 1
-					}
-					rf.mu.Unlock()
-				}
-			}()
-		}
-	}
-
-	return index - 1, term, isLeader
+	
+	return index, term, isLeader
 }
 
 //
@@ -646,24 +558,4 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	return rf
-}
-
-// Funções auxiliares:
-
-func (rf *Raft) GetIndexTerm(index int) int {
-	return rf.logs[index].TERM
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
